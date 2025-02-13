@@ -1,0 +1,139 @@
+import os
+import librosa
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from flask import Flask, request, jsonify, render_template
+
+def extract_features(file_path, max_pad_len=174):
+    """
+    Extract MFCC and Mel Spectrogram features from an audio file.
+    """
+    try:
+        # Load audio file
+        audio, sr = librosa.load(file_path, sr=None)
+        
+        # Extract MFCCs
+        mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=40)
+        pad_width = max_pad_len - mfccs.shape[1]
+        mfccs = np.pad(mfccs, pad_width=((0, 0), (0, pad_width)), mode='constant')
+        
+        # Extract Mel Spectrogram
+        mel_spec = librosa.feature.melspectrogram(y=audio, sr=sr)
+        mel_spec = librosa.power_to_db(mel_spec, ref=np.max)
+        mel_spec = np.pad(mel_spec, pad_width=((0, 0), (0, pad_width)), mode='constant')
+        
+        # Combine features
+        features = np.hstack((mfccs, mel_spec))
+        return features
+    except Exception as e:
+        print(f"Error processing {file_path}: {e}")
+        return None
+
+def load_dataset(dataset_path):
+    """
+    Load the RAVDESS dataset and extract features.
+    """
+    emotions = []
+    features = []
+    
+    for root, dirs, files in os.walk(dataset_path):
+        for file in files:
+            if file.endswith(".wav"):
+                file_path = os.path.join(root, file)
+                emotion = int(file.split("-")[2])  # Extract emotion label
+                emotions.append(emotion)
+                feature = extract_features(file_path)
+                if feature is not None:
+                    features.append(feature)
+    
+    # Convert to numpy arrays
+    features = np.array(features)
+    emotions = np.array(emotions)
+    
+    # Encode emotion labels
+    label_encoder = LabelEncoder()
+    emotions = label_encoder.fit_transform(emotions)
+    
+    return features, emotions, label_encoder
+
+def build_model(input_shape, num_classes):
+    """
+    Build a CNN model for emotion classification.
+    """
+    model = models.Sequential([
+        layers.Input(shape=input_shape),
+        layers.Reshape((input_shape[0], input_shape[1], 1)),
+        layers.Conv2D(32, (3, 3), activation='relu'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Conv2D(64, (3, 3), activation='relu'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Flatten(),
+        layers.Dense(128, activation='relu'),
+        layers.Dropout(0.5),
+        layers.Dense(num_classes, activation='softmax')
+    ])
+    
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+def train_model(dataset_path):
+    """
+    Train the emotion recognition model.
+    """
+    # Load dataset
+    features, emotions, label_encoder = load_dataset(dataset_path)
+    
+    # Split dataset into training and validation sets
+    X_train, X_val, y_train, y_val = train_test_split(features, emotions, test_size=0.2, random_state=42)
+    
+    # Build and train the model
+    input_shape = (X_train.shape[1], X_train.shape[2])
+    num_classes = len(label_encoder.classes_)
+    model = build_model(input_shape, num_classes)
+    
+    model.fit(X_train, y_train, epochs=20, batch_size=32, validation_data=(X_val, y_val))
+    
+    return model, label_encoder
+
+app = Flask(__name__)
+
+# Load the trained model and label encoder
+model, label_encoder = train_model("path_to_ravdess_dataset")
+
+@app.route("/")
+def home():
+    return render_template("index.html")
+
+@app.route("/predict", methods=["POST"])
+def predict():
+    """
+    Predict emotion from an uploaded audio file.
+    """
+    if 'file' not in request.files:
+        return jsonify({"error": "No file uploaded"})
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No file selected"})
+    
+    # Save the uploaded file
+    file_path = "temp.wav"
+    file.save(file_path)
+    
+    # Extract features and predict
+    features = extract_features(file_path)
+    if features is None:
+        return jsonify({"error": "Failed to process the audio file"})
+    
+    features = np.expand_dims(features, axis=0)
+    prediction = model.predict(features)
+    predicted_emotion = label_encoder.inverse_transform([np.argmax(prediction)])[0]
+    
+    return jsonify({"emotion": predicted_emotion})
+
+if __name__ == "__main__":
+    app.run(debug=True)
