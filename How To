@@ -1,0 +1,4 @@
+1. Download the RAVDESS dataset and update the dataset_path in the train_model function.
+2. Install the following libraries: pip install librosa numpy pandas tensorflow scikit-learn flask
+3. Run the Flask app: python app.py
+Open the web app in your browser at: http://127.0.0.1:5000
